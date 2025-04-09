@@ -484,23 +484,45 @@ function transformIdentifier(node: any, scopeManager: ScopeManager): void {
             return;
         }
 
-        // Skip transformation for known Pine Script built-in objects/functions
-        // TODO: Maintain a more comprehensive list or use a better detection method
-        const pineBuiltIns = new Set([
-            'plot', 'plotshape', 'plotchar', 'plotarrow', 'plotbar', 'plotcandle', 'bgcolor', 'fill', // Plotting
-            'color', 'ta', 'math', 'str', // Namespaces
-            'input', 'syminfo', 'request', 'strategy', // Built-in objects/namespaces
-            'time', 'timenow', 'year', 'month', 'weekofyear', 'dayofmonth', 'dayofweek', 'hour', 'minute', 'second', // Time
-            'open', 'high', 'low', 'close', 'volume', 'hl2', 'hlc3', 'ohlc4', // Built-in variables
-            'na' // Special value (already handled partially, but good to list)
+        // Handle Pine Script Built-ins
+        const pineSeriesVars = new Set([
+            'open', 'high', 'low', 'close', 'volume', 'time', // Primary series
+            'hl2', 'hlc3', 'ohlc4', // Combined series
+            'bar_index' // Index series
+            // Note: 'time_close', 'time_open' etc. might need specific handling if used
+        ]);
+        const pineOtherBuiltIns = new Set([
+            'plot', 'plotshape', 'plotchar', 'plotarrow', 'plotbar', 'plotcandle', 'bgcolor', 'fill', // Plotting fns
+            'color', 'ta', 'math', 'str', 'input', 'syminfo', 'request', 'strategy', // Namespaces / Objects
+            'timenow', 'year', 'month', 'weekofyear', 'dayofmonth', 'dayofweek', 'hour', 'minute', 'second', // Time functions
+            'na', 'nz' // Functions/Values
             // Add more as needed...
         ]);
-        if (pineBuiltIns.has(node.name)) {
-            // Special case: if it's 'na', ensure it's NaN, otherwise return
-            if (node.name === 'na') {
-                node.name = 'NaN';
+
+        if (pineSeriesVars.has(node.name)) {
+            // Check if it's being used directly (not like close[1])
+            const isDirectAccess = !(node.parent && node.parent.type === 'MemberExpression' && node.parent.object === node);
+            if (isDirectAccess) {
+                // Transform `close` -> `close[0]`
+                // Assumes `close` is already available in scope from context setup (const {close} = $.data)
+                Object.assign(node, {
+                    type: 'MemberExpression',
+                    object: { type: 'Identifier', name: node.name }, // Keep original name
+                    property: { type: 'Literal', value: 0 },
+                    computed: true,
+                });
             }
-            return; // Don't transform known built-ins
+            // If it *is* part of a MemberExpression (close[1]), we don't transform here,
+            // acorn-walk will handle the child nodes later.
+            return; // Prevent further transformation attempts
+        }
+
+        if (pineOtherBuiltIns.has(node.name)) {
+            // Special case: 'na' becomes NaN
+            if (node.name === 'na') { // Should this be handled here or earlier?
+                 node.name = 'NaN';
+            }
+            return; // Don't transform other built-ins (namespaces, functions etc.)
         }
 
         // Skip transformation for loop variables
@@ -862,11 +884,8 @@ function transformReturnStatement(node: any, scopeManager: ScopeManager): void {
                      node.parent = state.parent; // Set parent pointer
                      // Ensure nested calls are transformed
                      transformCallExpression(node, state.scopeManager); // Pass scopeManager
-                     // Continue walk for arguments
-                      // Note: transformCallExpression handles walking arguments internally now
-                      // node.arguments.forEach(arg => c(arg, { ...state, parent: node }, c));
+                      // transformCallExpression handles walking arguments internally
                  },
-                // Add other relevant visitors if needed, ensuring parent and scopeManager are passed
                  BinaryExpression(node: any, state: any, c: any) {
                      node.parent = state.parent;
                      c(node.left, { ...state, parent: node });
@@ -986,6 +1005,23 @@ function transformReturnStatement(node: any, scopeManager: ScopeManager): void {
                     computed: true,
                 };
             }
+        } else if (node.argument.type === 'CallExpression') {
+             // Handle CallExpressions returned directly
+             // Walk its arguments to ensure identifiers etc. are transformed
+            walk.recursive(node.argument, { parent: node.argument, scopeManager: scopeManager }, { 
+                Identifier(node: any, state: any) { node.parent = state.parent; transformIdentifier(node, state.scopeManager); },
+                MemberExpression(node: any, state: any, c:any) { 
+                    node.parent = state.parent; 
+                    transformMemberExpression(node, '', state.scopeManager); 
+                    if (node.object) c(node.object, { ...state, parent: node });
+                    if (node.property) c(node.property, { ...state, parent: node });
+                },
+                 CallExpression(node: any, state: any) { node.parent = state.parent; transformCallExpression(node, state.scopeManager); },
+                 BinaryExpression(node: any, state: any, c: any) { node.parent = state.parent; c(node.left, { ...state, parent: node }); c(node.right, { ...state, parent: node }); },
+                 LogicalExpression(node: any, state: any, c: any) { node.parent = state.parent; c(node.left, { ...state, parent: node }); c(node.right, { ...state, parent: node }); },
+                 ConditionalExpression(node: any, state: any, c: any) { node.parent = state.parent; c(node.test, { ...state, parent: node }); c(node.consequent, { ...state, parent: node }); c(node.alternate, { ...state, parent: node }); },
+                 UnaryExpression(node: any, state: any, c: any) { node.parent = state.parent; c(node.argument, { ...state, parent: node }); }
+            });
         }
     }
 }
@@ -1545,7 +1581,7 @@ function transformCallExpression(node: any, scopeManager: ScopeManager, namespac
         walk.recursive(arg, scopeManager, {
             Identifier(node: any, state: any, c: any) {
                 node.parent = state.parent;
-                transformIdentifier(node, scopeManager);
+                transformIdentifier(node, state);
                 const isBinaryOperation = node.parent && node.parent.type === 'BinaryExpression';
                 const isConditional = node.parent && node.parent.type === 'ConditionalExpression';
 

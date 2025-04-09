@@ -493,7 +493,7 @@ function transformIdentifier(node: any, scopeManager: ScopeManager): void {
         ]);
         const pineOtherBuiltIns = new Set([
             'plot', 'plotshape', 'plotchar', 'plotarrow', 'plotbar', 'plotcandle', 'bgcolor', 'fill', // Plotting fns
-            'color', 'ta', 'math', 'str', 'input', 'syminfo', 'request', 'strategy', // Namespaces / Objects
+            'color', /*'ta', 'math',*/ 'str', 'input', 'syminfo', 'request', 'strategy', // Namespaces / Objects (ta, math handled by isNamespaceCall)
             'timenow', 'year', 'month', 'weekofyear', 'dayofmonth', 'dayofweek', 'hour', 'minute', 'second', // Time functions
             'na', 'nz' // Functions/Values
             // Add more as needed...
@@ -526,12 +526,13 @@ function transformIdentifier(node: any, scopeManager: ScopeManager): void {
         }
 
         // Skip transformation for loop variables
-        if (scopeManager.isLoopVariable(node.name)) {
+        if (node.name === 'def') {
             return;
         }
 
-        // If it's a nested function parameter (but not a root parameter), skip transformation
-        if (scopeManager.isContextBound(node.name) && !scopeManager.isRootParam(node.name)) {
+        // If it's context-bound (likely a parameter), skip transformation.
+        // We simplify this check for now, relying solely on isContextBound.
+        if (scopeManager.isContextBound(node.name)) {
             return;
         }
 
@@ -1500,6 +1501,15 @@ function transformCallExpression(node: any, scopeManager: ScopeManager, namespac
         node.callee.object.type === 'Identifier' &&
         (scopeManager.isContextBound(node.callee.object.name) || node.callee.object.name === 'math' || node.callee.object.name === 'ta');
 
+    // Get the set of other built-ins for checking
+    const pineOtherBuiltIns = new Set([
+        'plot', 'plotshape', 'plotchar', 'plotarrow', 'plotbar', 'plotcandle', 'bgcolor', 'fill', // Plotting fns
+        'color', /*'ta', 'math',*/ 'str', 'input', 'syminfo', 'request', 'strategy', // Namespaces / Objects (ta, math handled by isNamespaceCall)
+        'timenow', 'year', 'month', 'weekofyear', 'dayofmonth', 'dayofweek', 'hour', 'minute', 'second', // Time functions
+        'na', 'nz' // Functions/Values
+        // Add more as needed...
+    ]);
+
     if (isNamespaceCall) {
         const namespace = node.callee.object.name;
         // Transform arguments using the namespace's param
@@ -1517,8 +1527,31 @@ function transformCallExpression(node: any, scopeManager: ScopeManager, namespac
         // }
         node._transformed = true;
     }
-    // Check if this is a regular function call (not a namespace method)
-    else if (node.callee && node.callee.type === 'Identifier') {
+    // >>> START NEW BLOCK
+    else if (node.callee.type === 'Identifier' && pineOtherBuiltIns.has(node.callee.name)) {
+        // Handle calls to other built-in functions (nz, plot, na, etc.)
+        // We need to transform their arguments correctly, respecting local scope (params)
+        node.arguments.forEach((arg: any) => {
+            walk.recursive(arg, { parent: arg, scopeManager: scopeManager }, { 
+                Identifier(node: any, state: any) { node.parent = state.parent; transformIdentifier(node, state.scopeManager); },
+                MemberExpression(node: any, state: any, c:any) { 
+                    node.parent = state.parent; 
+                    transformMemberExpression(node, '', state.scopeManager); 
+                    if (node.object) c(node.object, { ...state, parent: node });
+                    if (node.property) c(node.property, { ...state, parent: node });
+                },
+                 CallExpression(node: any, state: any) { node.parent = state.parent; transformCallExpression(node, state.scopeManager); }, // Handle nested calls
+                 BinaryExpression(node: any, state: any, c: any) { node.parent = state.parent; c(node.left, { ...state, parent: node }); c(node.right, { ...state, parent: node }); },
+                 LogicalExpression(node: any, state: any, c: any) { node.parent = state.parent; c(node.left, { ...state, parent: node }); c(node.right, { ...state, parent: node }); },
+                 ConditionalExpression(node: any, state: any, c: any) { node.parent = state.parent; c(node.test, { ...state, parent: node }); c(node.consequent, { ...state, parent: node }); c(node.alternate, { ...state, parent: node }); },
+                 UnaryExpression(node: any, state: any, c: any) { node.parent = state.parent; c(node.argument, { ...state, parent: node }); }
+            });
+        });
+        node._transformed = true;
+    }
+    // <<< END NEW BLOCK
+    // Check if this is a regular function call (user-defined)
+    else if (node.callee && node.callee.type === 'Identifier') { // Removed check against pineOtherBuiltIns here
         // Transform arguments WITHOUT using the top-level $.param wrapper.
         // We still need to walk into arguments to transform identifiers, nested calls etc.
         node.arguments.forEach((arg: any) => {
@@ -1565,14 +1598,6 @@ function transformCallExpression(node: any, scopeManager: ScopeManager, namespac
                  }
             });
         });
-
-        // node.arguments = node.arguments.map((arg: any) => {
-        //     // If argument is already a param call, don't wrap it again
-        //     if (arg._isParamCall) {
-        //         return arg;
-        //     }
-        //     return transformFunctionArgument(arg, CONTEXT_NAME, scopeManager);
-        // });
         node._transformed = true;
     }
 
@@ -1613,68 +1638,80 @@ function transformCallExpression(node: any, scopeManager: ScopeManager, namespac
 function transformFunctionDeclaration(node: any, scopeManager: ScopeManager): void {
     // Register function parameters as context-bound (but not as root params)
     node.params.forEach((param: any) => {
+        // Check for Identifier OR AssignmentPattern (for default values)
+        let identifierNode: any | null = null;
         if (param.type === 'Identifier') {
-            scopeManager.addContextBoundVar(param.name, false);
+            identifierNode = param;
+        } else if (param.type === 'AssignmentPattern' && param.left.type === 'Identifier') {
+            identifierNode = param.left; // Get the identifier part
+             // We might need to transform the default value (param.right) here too if it involves variables
+             // For now, assume default values are simple literals or won't cause issues.
+             // TODO: Add walk/transformation for param.right if needed.
+        }
+
+        if (identifierNode) {
+            const paramName = identifierNode.name;
+            scopeManager.addContextBoundVar(paramName, false);
+            // if (paramName === 'def') { console.log(`+++ DEBUG: Registered parameter '${paramName}' (type: ${param.type}) in transformFunctionDeclaration`); } // <<< REMOVE DEBUG LOG
         }
     });
 
     // Transform the function body
     if (node.body && node.body.type === 'BlockStatement') {
         scopeManager.pushScope('fn');
+        // if (node.id?.name === 'MaxMinNz') { console.log(`+++ DEBUG: After pushScope for ${node.id.name}, is 'def' contextBound? ${scopeManager.isContextBound('def')}`); } // <<< REMOVE DEBUG LOG
+
+        // Use scopeManager for the walk, state within visitors
         walk.recursive(node.body, scopeManager, {
             BlockStatement(node: any, state: ScopeManager, c: any) {
-                //state.pushScope('block');
                 node.body.forEach((stmt: any) => c(stmt, state));
-                //state.popScope();
             },
-            ReturnStatement(node: any, state: ScopeManager) {
-                transformReturnStatement(node, state);
-            },
-            VariableDeclaration(node: any, state: ScopeManager) {
-                transformVariableDeclaration(node, state);
-            },
-            Identifier(node: any, state: ScopeManager) {
-                transformIdentifier(node, state);
-            },
-            CallExpression(node: any, state: ScopeManager) {
-                // Transform the call expression itself
-                transformCallExpression(node, state);
+            ReturnStatement(retNode: any, state: ScopeManager) {
+                // Revert: Remove comparison logs, keep original simple log
+                 // if (state.isContextBound('def')) { console.log(`+++ DEBUG: Before transformReturnStatement, 'def' IS contextBound`); } else { console.log(`+++ DEBUG: Before transformReturnStatement, 'def' IS NOT contextBound`); } // <<< REMOVE DEBUG LOG
 
-                // Also transform any nested call expressions in the arguments
-                node.arguments.forEach((arg: any) => {
-                    if (arg.type === 'BinaryExpression') {
-                        walk.recursive(arg, state, {
-                            CallExpression(node: any, state: ScopeManager) {
-                                transformCallExpression(node, state);
-                            },
-                            MemberExpression(node: any) {
-                                transformMemberExpression(node, '', state);
-                            },
-                        });
-                    }
-                });
+                // Revert: Use state
+                transformReturnStatement(retNode, state);
             },
-            MemberExpression(node: any) {
-                transformMemberExpression(node, '', scopeManager);
+            VariableDeclaration(varDeclNode: any, state: ScopeManager) { // state might be unreliable
+                transformVariableDeclaration(varDeclNode, state); // <<< USE bodyScopeManager
             },
-            AssignmentExpression(node: any, state: ScopeManager) {
-                transformAssignmentExpression(node, state);
+            Identifier(idNode: any, state: ScopeManager) { // state might be unreliable
+                transformIdentifier(idNode, state); // <<< USE bodyScopeManager
             },
-            ForStatement(node: any, state: ScopeManager, c: any) {
-                transformForStatement(node, state, c);
+            CallExpression(callExprNode: any, state: ScopeManager) { // state might be unreliable
+                transformCallExpression(callExprNode, state); // <<< USE bodyScopeManager
             },
-            IfStatement(node: any, state: ScopeManager, c: any) {
-                transformIfStatement(node, state, c);
+            MemberExpression(memNode: any /* state unused */) {
+                // Pass the correct scope manager to the transformation
+                transformMemberExpression(memNode, '', scopeManager); // <<< USE bodyScopeManager
             },
-            BinaryExpression(node: any, state: ScopeManager, c: any) {
-                // Transform both sides of binary expressions
-                walk.recursive(node, state, {
-                    CallExpression(node: any, state: ScopeManager) {
-                        transformCallExpression(node, state);
+            AssignmentExpression(assignNode: any, state: ScopeManager) { // state might be unreliable
+                transformAssignmentExpression(assignNode, state); // <<< USE bodyScopeManager
+            },
+            ForStatement(forNode: any, state: ScopeManager, c: any) { // state might be unreliable
+                // Pass bodyScopeManager to the transformation, but state might be needed for c
+                transformForStatement(forNode, state, c); // <<< USE bodyScopeManager
+            },
+            IfStatement(ifNode: any, state: ScopeManager, c: any) { // state might be unreliable
+                 // Pass bodyScopeManager to the transformation, but state might be needed for c
+                transformIfStatement(ifNode, state, c); // <<< USE bodyScopeManager
+            },
+            BinaryExpression(binNode: any, state: ScopeManager, c: any) { // state might be unreliable
+                // Walk children with potentially unreliable state, but transformations within will use bodyScopeManager if they call helpers
+                walk.recursive(binNode, scopeManager, { // Use bodyScopeManager for this sub-walk too
+                    CallExpression(node: any, subState: ScopeManager) {
+                        transformCallExpression(node, scopeManager); // <<< USE bodyScopeManager
                     },
-                    MemberExpression(node: any) {
-                        transformMemberExpression(node, '', state);
+                    MemberExpression(node: any /* subState unused */) {
+                        transformMemberExpression(node, '', scopeManager); // <<< USE bodyScopeManager
                     },
+                     // Add other necessary visitors for BinaryExpression sub-walk, using bodyScopeManager
+                     Identifier(node: any, subState: ScopeManager) {
+                        transformIdentifier(node, scopeManager); // <<< USE bodyScopeManager
+                    },
+                     // Ensure parent node info is still passed if needed by transformIdentifier
+                     // The walk.recursive call in transformReturnStatement/transformCallExpression does this better
                 });
             },
         });
@@ -2050,9 +2087,10 @@ export function transpile(fn: string | Function): Function {
     });
 
     const transformedCode = astring.generate(ast);
-    console.log("--- Transformed Code ---");
-    console.log(transformedCode);
-    console.log("------------------------");
+    // REMOVE DEBUG LOGS for transformedCode
+    // console.log("--- Transformed Code ---");
+    // console.log(transformedCode);
+    // console.log("------------------------");
 
     const _wraperFunction = new Function('', `return ${transformedCode}`);
     return _wraperFunction(this);

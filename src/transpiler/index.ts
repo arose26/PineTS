@@ -1972,80 +1972,72 @@ export function transpile(fn: string | Function): Function {
     // Pre-process: Identify context-bound variables
     preProcessContextBoundVars(ast, scopeManager);
 
-    // First pass: register all function declarations and their parameters
+    // First pass: register all function declarations and their parameters, and top-level variable names
     walk.simple(ast, {
         FunctionDeclaration(node: any) {
-            transformFunctionDeclaration(node, scopeManager);
+            // Register parameters only, DO NOT TRANSFORM BODY HERE
+             node.params.forEach((param: any) => {
+                 let identifierNode: any | null = null;
+                 if (param.type === 'Identifier') {
+                     identifierNode = param;
+                 } else if (param.type === 'AssignmentPattern' && param.left.type === 'Identifier') {
+                     identifierNode = param.left; 
+                 }
+                 if (identifierNode) {
+                     scopeManager.addContextBoundVar(identifierNode.name, false);
+                 }
+             });
+             // Optionally register function name itself if needed for calls
+             if (node.id) {
+                 // Assuming function names declared globally shouldn't be transformed by default identifier logic
+                 // Might need a way to register them differently if they can be reassigned?
+                 // For now, let's assume they are handled like other built-ins if called.
+             }
+            // transformFunctionDeclaration(node, scopeManager); // <<< REMOVE BODY PROCESSING
         },
         ArrowFunctionExpression(node: any) {
+             // Register parameters only, DO NOT TRANSFORM BODY HERE
             const isRootFunction = node.start === 0;
             if (isRootFunction && node.params && node.params.length > 0) {
-                originalParamName = node.params[0].name;
-                node.params[0].name = CONTEXT_NAME;
+                 // Handle the main entry point parameter transformation if needed
+                 // originalParamName = node.params[0].name;
+                 // node.params[0].name = CONTEXT_NAME;
+                 // Keep parameter registration simple for now
+                scopeManager.addContextBoundVar(node.params[0].name, isRootFunction); 
+            } else {
+                 // For nested arrow functions (if any remain after pre-processing)
+                 node.params.forEach((param: any) => {
+                     if (param.type === 'Identifier') {
+                         scopeManager.addContextBoundVar(param.name, false);
+                     }
+                      // Handle AssignmentPattern for arrow func params too
+                     else if (param.type === 'AssignmentPattern' && param.left.type === 'Identifier') {
+                         scopeManager.addContextBoundVar(param.left.name, false);
+                     }
+                 });
             }
-            transformArrowFunctionParams(node, scopeManager, isRootFunction);
+            // transformArrowFunctionParams(node, scopeManager, isRootFunction); // <<< REMOVE BODY PROCESSING LOGIC if any was here
         },
         VariableDeclaration(node: any) {
-            node.declarations.forEach((decl: any) => {
-                if (decl.id.type === 'ArrayPattern') {
-                    // Generate a unique temporary variable name
-                    const tempVarName = scopeManager.generateTempVar();
-
-                    // Create a new variable declaration for the temporary variable
-                    const tempVarDecl = {
-                        type: 'VariableDeclaration',
-                        kind: node.kind,
-                        declarations: [
-                            {
-                                type: 'VariableDeclarator',
-                                id: {
-                                    type: 'Identifier',
-                                    name: tempVarName,
-                                },
-                                init: decl.init,
-                            },
-                        ],
-                    };
-
+             // Register variable names declared at this top level (likely global)
+             node.declarations.forEach((decl: any) => {
+                 if (decl.id.type === 'Identifier') {
+                     scopeManager.addVariable(decl.id.name, node.kind); // Register name
+                 } else if (decl.id.type === 'ArrayPattern') {
+                    // Handle ArrayPattern registration - just register names for now
                     decl.id.elements?.forEach((element: any) => {
-                        if (element.type === 'Identifier') {
-                            scopeManager.addArrayPatternElement(element.name);
+                        if (element?.type === 'Identifier') {
+                           scopeManager.addVariable(element.name, node.kind);
+                           scopeManager.addArrayPatternElement(element.name);
                         }
                     });
-                    // Create individual variable declarations for each destructured element
-                    const individualDecls = decl.id.elements.map((element: any, index: number) => ({
-                        type: 'VariableDeclaration',
-                        kind: node.kind,
-                        declarations: [
-                            {
-                                type: 'VariableDeclarator',
-                                id: element,
-                                init: {
-                                    type: 'MemberExpression',
-                                    object: {
-                                        type: 'Identifier',
-                                        name: tempVarName,
-                                    },
-                                    property: {
-                                        type: 'Literal',
-                                        value: index,
-                                    },
-                                    computed: true,
-                                },
-                            },
-                        ],
-                    }));
-
-                    // Replace the original declaration with the new declarations
-                    Object.assign(node, {
-                        type: 'BlockStatement',
-                        body: [tempVarDecl, ...individualDecls],
-                    });
+                    // The complex transformation logic needs to move to the second pass
                 }
             });
+            // Defer full transformation of VariableDeclaration to second pass
         },
         ForStatement(node: any) {
-            // Skip registering loop variables in the first pass
+            // Skip registering loop variables in the first pass - handled in second pass
         },
     });
 
@@ -2053,13 +2045,18 @@ export function transpile(fn: string | Function): Function {
     walk.recursive(ast, scopeManager, {
         BlockStatement(node: any, state: ScopeManager, c: any) {
             //state.pushScope('block');
+            // If the block is a function body, the scope is already pushed by FunctionDeclaration visitor
+            // Need to be careful not to double-push/pop for function bodies
+            const isFunctionBody = node.parent && (node.parent.type === 'FunctionDeclaration' || node.parent.type === 'ArrowFunctionExpression');
+            // if (!isFunctionBody) state.pushScope('block'); // Simple block scoping might be needed
             node.body.forEach((stmt: any) => c(stmt, state));
-            //state.popScope();
+            // if (!isFunctionBody) state.popScope();
         },
         ReturnStatement(node: any, state: ScopeManager) {
             transformReturnStatement(node, state);
         },
         VariableDeclaration(node: any, state: ScopeManager) {
+            // Now perform the full transformation of variable declarations
             transformVariableDeclaration(node, state);
         },
         Identifier(node: any, state: ScopeManager) {
@@ -2074,23 +2071,46 @@ export function transpile(fn: string | Function): Function {
         AssignmentExpression(node: any, state: ScopeManager) {
             transformAssignmentExpression(node, state);
         },
-        FunctionDeclaration(node: any, state: ScopeManager) {
-            // Skip transformation since we already handled it in the first pass
-            return;
+        FunctionDeclaration(node: any, state: ScopeManager, c: any) {
+            // First pass handled parameter registration.
+            // Now, push scope, process the body, then pop scope.
+            // IMPORTANT: Ensure the 'state' here IS the correct outer scopeManager instance.
+            state.pushScope('fn');
+            // Use walk.recursive for the body to handle nested structures correctly
+            if (node.body && node.body.type === 'BlockStatement') {
+                // Pass the state (which is now the inner function scope) to the body walk
+                node.body.body.forEach((stmt: any) => c(stmt, state)); 
+            }
+            state.popScope();
+            // DO NOT return here anymore, let the walker continue if needed.
+            // return; 
         },
+         // Potentially add ArrowFunctionExpression visitor if nested ones need body processing
+         ArrowFunctionExpression(node: any, state: ScopeManager, c: any) {
+             // Similar logic to FunctionDeclaration if arrow function bodies need transformation
+              const isRootFunction = node.start === 0;
+              if (!isRootFunction) { // Only process bodies of non-root arrows here
+                 state.pushScope('fn');
+                 if (node.body.type === 'BlockStatement') {
+                     node.body.body.forEach((stmt: any) => c(stmt, state));
+                 } else { 
+                     // Handle expression body (e.g., x => x + 1)
+                     // Need to call the visitor for the expression body
+                     c(node.body, state);
+                 }
+                 state.popScope();
+              }
+         },
         ForStatement(node: any, state: ScopeManager, c: any) {
             transformForStatement(node, state, c);
-        },
-        IfStatement(node: any, state: ScopeManager, c: any) {
-            transformIfStatement(node, state, c);
         },
     });
 
     const transformedCode = astring.generate(ast);
-    // REMOVE DEBUG LOGS for transformedCode
-    // console.log("--- Transformed Code ---");
-    // console.log(transformedCode);
-    // console.log("------------------------");
+    // RE-ENABLE DEBUG LOGS for transformedCode
+    console.log("--- Transformed Code ---");
+    console.log(transformedCode);
+    console.log("------------------------");
 
     const _wraperFunction = new Function('', `return ${transformedCode}`);
     return _wraperFunction(this);

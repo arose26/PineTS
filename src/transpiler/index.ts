@@ -470,7 +470,7 @@ function transformVariableDeclaration(varNode: any, scopeManager: ScopeManager):
 function transformIdentifier(node: any, scopeManager: ScopeManager): void {
     // Transform identifiers to use the context object
     if (node.name !== CONTEXT_NAME) {
-        // Skip transformation for global and native objects
+        // Skip transformation for global and native JS objects
         if (
             node.name === 'Math' ||
             node.name === 'NaN' ||
@@ -482,6 +482,25 @@ function transformIdentifier(node: any, scopeManager: ScopeManager): void {
             (node.name.startsWith('`') && node.name.endsWith('`'))
         ) {
             return;
+        }
+
+        // Skip transformation for known Pine Script built-in objects/functions
+        // TODO: Maintain a more comprehensive list or use a better detection method
+        const pineBuiltIns = new Set([
+            'plot', 'plotshape', 'plotchar', 'plotarrow', 'plotbar', 'plotcandle', 'bgcolor', 'fill', // Plotting
+            'color', 'ta', 'math', 'str', // Namespaces
+            'input', 'syminfo', 'request', 'strategy', // Built-in objects/namespaces
+            'time', 'timenow', 'year', 'month', 'weekofyear', 'dayofmonth', 'dayofweek', 'hour', 'minute', 'second', // Time
+            'open', 'high', 'low', 'close', 'volume', 'hl2', 'hlc3', 'ohlc4', // Built-in variables
+            'na' // Special value (already handled partially, but good to list)
+            // Add more as needed...
+        ]);
+        if (pineBuiltIns.has(node.name)) {
+            // Special case: if it's 'na', ensure it's NaN, otherwise return
+            if (node.name === 'na') {
+                node.name = 'NaN';
+            }
+            return; // Don't transform known built-ins
         }
 
         // Skip transformation for loop variables
@@ -788,28 +807,20 @@ function transformReturnStatement(node: any, scopeManager: ScopeManager): void {
                         object: {
                             type: 'MemberExpression',
                             object: {
-                                type: 'MemberExpression',
-                                object: {
-                                    type: 'Identifier',
-                                    name: CONTEXT_NAME,
-                                },
-                                property: {
-                                    type: 'Identifier',
-                                    name: kind,
-                                },
-                                computed: false,
+                                type: 'Identifier',
+                                name: CONTEXT_NAME,
                             },
                             property: {
                                 type: 'Identifier',
-                                name: scopedName,
+                                name: kind,
                             },
                             computed: false,
                         },
                         property: {
-                            type: 'Literal',
-                            value: 0,
+                            type: 'Identifier',
+                            name: scopedName,
                         },
-                        computed: true,
+                        computed: false,
                     };
                 } else if (element.type === 'MemberExpression') {
                     // If it's already a member expression (array access), leave it as is
@@ -834,16 +845,49 @@ function transformReturnStatement(node: any, scopeManager: ScopeManager): void {
             };
         } else if (node.argument.type === 'BinaryExpression') {
             // Transform both operands of the binary expression
-            walk.recursive(node.argument, scopeManager, {
-                Identifier(node: any, state: ScopeManager) {
-                    transformIdentifier(node, state);
-                    if (node.type === 'Identifier') {
-                        addArrayAccess(node, state);
-                    }
+            // Ensure parent pointers are set for identifiers within the expression
+            walk.recursive(node.argument, { parent: node.argument, scopeManager: scopeManager }, { 
+                Identifier(node: any, state: any, c:any) {
+                    node.parent = state.parent; // Set parent pointer
+                    transformIdentifier(node, state.scopeManager); // Pass scopeManager
                 },
-                MemberExpression(node: any) {
-                    transformMemberExpression(node, '', scopeManager);
+                MemberExpression(node: any, state: any, c:any) {
+                    node.parent = state.parent; // Set parent pointer
+                    transformMemberExpression(node, '', state.scopeManager); // Pass scopeManager
+                    // Continue walk correctly, passing state
+                     if (node.object) c(node.object, { ...state, parent: node });
+                     if (node.property) c(node.property, { ...state, parent: node });
                 },
+                 CallExpression(node: any, state: any, c: any) {
+                     node.parent = state.parent; // Set parent pointer
+                     // Ensure nested calls are transformed
+                     transformCallExpression(node, state.scopeManager); // Pass scopeManager
+                     // Continue walk for arguments
+                      // Note: transformCallExpression handles walking arguments internally now
+                      // node.arguments.forEach(arg => c(arg, { ...state, parent: node }, c));
+                 },
+                // Add other relevant visitors if needed, ensuring parent and scopeManager are passed
+                 BinaryExpression(node: any, state: any, c: any) {
+                     node.parent = state.parent;
+                     c(node.left, { ...state, parent: node });
+                     c(node.right, { ...state, parent: node });
+                 },
+                 LogicalExpression(node: any, state: any, c: any) { 
+                     node.parent = state.parent;
+                     c(node.left, { ...state, parent: node });
+                     c(node.right, { ...state, parent: node });
+                 },
+                 ConditionalExpression(node: any, state: any, c: any) {
+                     node.parent = state.parent;
+                     c(node.test, { ...state, parent: node });
+                     c(node.consequent, { ...state, parent: node });
+                     c(node.alternate, { ...state, parent: node });
+                 },
+                 UnaryExpression(node: any, state: any, c: any) {
+                     node.parent = state.parent;
+                     c(node.argument, { ...state, parent: node });
+                 }
+                 // Add other expression types as needed
             });
         } else if (node.argument.type === 'ObjectExpression') {
             // Handle object expressions (existing code)
@@ -889,52 +933,59 @@ function transformReturnStatement(node: any, scopeManager: ScopeManager): void {
                 return prop;
             });
         } else if (node.argument.type === 'Identifier') {
-            // Handle identifier return values
-            const [scopedName, kind] = scopeManager.getVariable(node.argument.name);
-            node.argument = {
-                type: 'MemberExpression',
-                object: {
+            // Check if the identifier is a context-bound variable (likely a function parameter)
+            if (scopeManager.isContextBound(node.argument.name) && !scopeManager.isRootParam(node.argument.name)) {
+                // If it's a non-root parameter, return it directly.
+                // The caller context will handle whether it needs the series or the [0] value.
+                // Keep the original identifier node
+                 //node.argument = { // << PREVIOUS INCORRECT CODE TO REMOVE/COMMENT OUT
+                 //    type: 'MemberExpression',
+                 //    object: { // The original identifier node (parameter name)
+                 //        type: 'Identifier',
+                 //        name: node.argument.name
+                 //    },
+                 //    property: {
+                 //        type: 'Literal',
+                 //        value: 0
+                 //    },
+                 //    computed: true
+                 //}; // << END PREVIOUS INCORRECT CODE
+                 // No transformation needed for the identifier itself here - just leave node.argument as is.
+            } else {
+                // If it's not context-bound (or is a root param), transform it as a scoped variable
+                const [scopedName, kind] = scopeManager.getVariable(node.argument.name);
+                node.argument = {
                     type: 'MemberExpression',
                     object: {
-                        type: 'Identifier',
-                        name: CONTEXT_NAME,
+                        type: 'MemberExpression',
+                        object: {
+                            type: 'Identifier',
+                            name: CONTEXT_NAME,
+                        },
+                        property: {
+                            type: 'Identifier',
+                            name: kind,
+                        },
+                        computed: false,
                     },
                     property: {
                         type: 'Identifier',
-                        name: kind,
+                        name: scopedName,
                     },
                     computed: false,
-                },
-                property: {
-                    type: 'Identifier',
-                    name: scopedName,
-                },
-                computed: false,
-            };
+                };
 
-            // Add [0] array access
-            node.argument = {
-                type: 'MemberExpression',
-                object: node.argument,
-                property: {
-                    type: 'Literal',
-                    value: 0,
-                },
-                computed: true,
-            };
-        }
-
-        if (curScope === 'fn') {
-            //for nested functions : wrap the return argument in a CallExpression with math._precision(<statement>)
-            node.argument = {
-                type: 'CallExpression',
-                callee: {
+                // Add [0] array access for regular variables
+                node.argument = {
                     type: 'MemberExpression',
-                    object: { type: 'Identifier', name: CONTEXT_NAME },
-                    property: { type: 'Identifier', name: 'precision' },
-                },
-                arguments: [node.argument],
-            };
+                    object: node.argument,
+                    property: {
+                        type: 'Literal',
+                        value: 0,
+                    },
+                    computed: true,
+                };
+            }
         }
     }
 }
@@ -1377,7 +1428,7 @@ function transformFunctionArgument(arg: any, namespace: string, scopeManager: Sc
     // For all other cases, transform normally
 
     if (arg?.type === 'CallExpression') {
-        transformCallExpression(arg, scopeManager, namespace);
+        transformCallExpression(arg, scopeManager);
     }
     return {
         type: 'CallExpression',
@@ -1432,14 +1483,60 @@ function transformCallExpression(node: any, scopeManager: ScopeManager, namespac
     }
     // Check if this is a regular function call (not a namespace method)
     else if (node.callee && node.callee.type === 'Identifier') {
-        // Transform arguments using $.param
-        node.arguments = node.arguments.map((arg: any) => {
-            // If argument is already a param call, don't wrap it again
-            if (arg._isParamCall) {
-                return arg;
-            }
-            return transformFunctionArgument(arg, CONTEXT_NAME, scopeManager);
+        // Transform arguments WITHOUT using the top-level $.param wrapper.
+        // We still need to walk into arguments to transform identifiers, nested calls etc.
+        node.arguments.forEach((arg: any) => {
+            walk.recursive(arg, scopeManager, {
+                Identifier(idNode: any, state: ScopeManager) {
+                    transformIdentifier(idNode, state);
+                    // Handle cases where identifier might need array access within expressions
+                    const isBinOrCond = idNode.parent && (idNode.parent.type === 'BinaryExpression' || idNode.parent.type === 'ConditionalExpression');
+                    if (idNode.type === 'Identifier' && isBinOrCond) {
+                         // If transformIdentifier didn't convert it (e.g. loop var, param),
+                         // but it's used in an expression, it might need [0]
+                         // This needs careful consideration - relying on transformIdentifier for now.
+                    }
+                },
+                CallExpression(callNode: any, state: ScopeManager) {
+                    if (!callNode._transformed) {
+                        transformCallExpression(callNode, state); // Recursively transform nested calls
+                    }
+                },
+                MemberExpression(memNode: any, state: ScopeManager, c: any) {
+                    // Transform the member expression itself (e.g., array indexing)
+                    transformMemberExpression(memNode, '', state);
+                    // No need to explicitly call c(...) for children here.
+                    // walk.recursive will automatically continue the walk into
+                    // memNode.object and memNode.property using the default walkers,
+                    // passing the state along correctly.
+                },
+                // Add handlers for other expression types if they can contain transformable nodes
+                BinaryExpression(binNode: any, state: ScopeManager, c: any) {
+                    c(binNode.left, state);
+                    c(binNode.right, state);
+                },
+                 LogicalExpression(logNode: any, state: ScopeManager, c: any) {
+                    c(logNode.left, state);
+                    c(logNode.right, state);
+                },
+                 ConditionalExpression(condNode: any, state: ScopeManager, c: any) {
+                     c(condNode.test, state);
+                     c(condNode.consequent, state);
+                     c(condNode.alternate, state);
+                 },
+                 UnaryExpression(unNode: any, state: ScopeManager, c: any) {
+                     c(unNode.argument, state);
+                 }
+            });
         });
+
+        // node.arguments = node.arguments.map((arg: any) => {
+        //     // If argument is already a param call, don't wrap it again
+        //     if (arg._isParamCall) {
+        //         return arg;
+        //     }
+        //     return transformFunctionArgument(arg, CONTEXT_NAME, scopeManager);
+        // });
         node._transformed = true;
     }
 
@@ -1470,7 +1567,7 @@ function transformCallExpression(node: any, scopeManager: ScopeManager, namespac
                 transformMemberExpression(node, '', scopeManager);
                 // Then continue with object transformation
                 if (node.object) {
-                    c(node.object, { parent: node, inNamespaceCall: state.inNamespaceCall });
+                    c(node.object, { parent: node });
                 }
             },
         });
@@ -1780,13 +1877,18 @@ function preProcessContextBoundVars(ast: any, scopeManager: ScopeManager): void 
 }
 
 export function transpile(fn: string | Function): Function {
-    let code = typeof fn === 'function' ? fn.toString() : fn;
+    let ast:any;
+    if (typeof fn !== "object"){
+      let code = typeof fn === "function" ? fn.toString() : fn;
+      ast = acorn.parse(code.trim(), {
+        ecmaVersion: "latest",
+        sourceType: "module"
+      });
+      //console.log(JSON.stringify(ast, null, 2));
+    } else {
+      ast = fn; //sent in tree directly
+    }
 
-    // Parse the code into an AST
-    const ast = acorn.parse(code.trim(), {
-        ecmaVersion: 'latest',
-        sourceType: 'module',
-    });
 
     // Pre-process: Transform all nested arrow functions
     transformNestedArrowFunctions(ast);
@@ -1912,6 +2014,9 @@ export function transpile(fn: string | Function): Function {
     });
 
     const transformedCode = astring.generate(ast);
+    console.log("--- Transformed Code ---");
+    console.log(transformedCode);
+    console.log("------------------------");
 
     const _wraperFunction = new Function('', `return ${transformedCode}`);
     return _wraperFunction(this);

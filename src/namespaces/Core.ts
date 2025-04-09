@@ -70,7 +70,7 @@ export class Core {
 
         this.context.plots[title].data.push({
             time: this.context.marketData[this.context.marketData.length - this.context.idx - 1].openTime,
-            value: series[0],
+            value: Array.isArray(series) ? series[0] : series,
             options: this.extractPlotOptions(options),
         });
     }

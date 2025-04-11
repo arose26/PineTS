@@ -131,10 +131,15 @@ const ESConfigDev = {
         file: './dist/pinets.dev.es.js',
     },
     plugins: [
+        resolve({
+            preferBuiltins: true,
+            extensions: ['.js', '.ts', '.json'],
+        }),
+        commonjs(),
         json(),
         //filenameReplacePlugin(),
         typescriptPaths({
-            tsconfig: '../tsconfig.json',
+            tsconfig: './tsconfig.json',
             preserveExtensions: true,
             nonRelative: false,
         }),
@@ -142,6 +147,7 @@ const ESConfigDev = {
             sourceMap: true,
             minify: false,
             treeShaking: false,
+            target: 'esnext'
         }),
 
         addSPDXHeader(),

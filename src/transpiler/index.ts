@@ -1949,7 +1949,29 @@ function preProcessContextBoundVars(ast: any, scopeManager: ScopeManager): void 
     });
 }
 
-export function transpile(fn: string | Function): Function {
+import { transpilePineScript } from './pinescript/index';
+
+export function transpile(fn: string): Function {
+    let pineTSCode = transpilePineScript(fn);
+
+    const preamble = `const {time, open, high, low, close, volume} = $.data;
+    const {plot, plotchar, nz, color} = $.core;
+    const ta = $.ta;
+    const input = $.input;
+    const math = $.math;
+    const bar_index = $.idx;`
+    
+    const transformedCode = pineTSCode.replace('$ => {', '$ => {'+preamble);
+
+    // RE-ENABLE DEBUG LOGS for transformedCode
+    console.log("--- Transformed Code ---");
+    console.log(transformedCode);
+    console.log("------------------------");
+
+    const _wraperFunction = new Function('', `return ${transformedCode}`);
+    return _wraperFunction(this);
+    
+    /*
     let ast:any;
     if (typeof fn !== "object"){
       let code = typeof fn === "function" ? fn.toString() : fn;
@@ -1960,7 +1982,7 @@ export function transpile(fn: string | Function): Function {
       //console.log(JSON.stringify(ast, null, 2));
     } else {
       ast = fn; //sent in tree directly
-    }
+    }*/
 
 
     // Pre-process: Transform all nested arrow functions
@@ -2106,12 +2128,21 @@ export function transpile(fn: string | Function): Function {
         },
     });
 
-    const transformedCode = astring.generate(ast);
+
+    const preamble2 = `const {time, open, high, low, close, volume} = $.data;
+const {plot, plotchar, nz, color} = $.core;
+const ta = $.ta;
+const input = $.input;
+const math = $.math;
+const bar_index = $.idx;`
+
+    const transformedCode2 = astring.generate(ast).replace('$ => {', '$ => {'+preamble2);
+
     // RE-ENABLE DEBUG LOGS for transformedCode
     console.log("--- Transformed Code ---");
-    console.log(transformedCode);
+    console.log(transformedCode2);
     console.log("------------------------");
 
-    const _wraperFunction = new Function('', `return ${transformedCode}`);
-    return _wraperFunction(this);
+    const _wraperFunction2 = new Function('', `return ${transformedCode2}`);
+    return _wraperFunction2(this);
 }

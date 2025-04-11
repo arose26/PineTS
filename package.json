@@ -23,8 +23,11 @@
     "author": "Alaa-eddine KADDOURI",
     "license": "AGPL-3.0",
     "dependencies": {
+        "@blakeembrey/deque": "^1.0.5",
         "acorn": "^8.14.0",
         "acorn-walk": "^8.3.4",
+        "antlr4ts": "^0.5.0-alpha.4",
+        "antlr4ts-cli": "^0.5.0-alpha.4",
         "astring": "^1.9.0"
     },
     "devDependencies": {

@@ -4,6 +4,7 @@
 import { Core } from '@pinets/namespaces/Core';
 import { Input } from '@pinets/namespaces/Input';
 import PineMath from '@pinets/namespaces/PineMath';
+import Strategy from '@pinets/namespaces/Strategy';
 import { PineRequest } from '@pinets/namespaces/PineRequest';
 import TechnicalAnalysis from '@pinets/namespaces/TechnicalAnalysis';
 import { PineArray } from './namespaces/PineArray';
@@ -25,6 +26,7 @@ export class Context {
 
     public NA: any = NaN;
 
+    public strategy: Strategy;
     public math: PineMath;
     public ta: TechnicalAnalysis;
     public input: Input;
@@ -79,7 +81,7 @@ export class Context {
         this.eDate = eDate;
 
         this.math = new PineMath(this);
-
+        this.strategy = new Strategy(this);
         this.ta = new TechnicalAnalysis(this);
         this.input = new Input(this);
         this.request = new PineRequest(this);

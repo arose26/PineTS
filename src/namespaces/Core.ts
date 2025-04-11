@@ -9,6 +9,7 @@ export class Core {
             return source;
         },
         rgb: (r: number, g: number, b: number, a?: number) => (a ? `rgba(${r}, ${g}, ${b}, ${a})` : `rgb(${r}, ${g}, ${b})`),
+        rgba: (r: number, g: number, b: number, a: number) => `rgba(${r}, ${g}, ${b}, ${a})`,
         new: (color: string, a?: number) => {
             // Handle hexadecimal colors
             if (color && color.startsWith('#')) {
